@@ -7,53 +7,15 @@ from mafia_game.engine.rules import (
     GameError,
     add_player,
     advance_phase,
-    create_game,
     mafia_count,
     return_to_lobby,
     should_end_early,
     skip_discussion,
     start_game,
     submit_night_action,
-    submit_vote,
     update_settings,
 )
-
-NOW = 1_000_000  # a fake "current time" in ms, so tests never depend on the clock
-
-# p0 = mafia, p1 = doctor, p2 = detective, p3 and p4 = villagers
-FIVE = [Role.MAFIA, Role.DOCTOR, Role.DETECTIVE, Role.VILLAGER, Role.VILLAGER]
-
-
-def lobby(player_count: int) -> GameState:
-    state = create_game("ABCDEF", "p0", "Player0")
-    for i in range(1, player_count):
-        add_player(state, f"p{i}", f"Player{i}")
-    return state
-
-
-def game_at_night(roles: list[Role]) -> GameState:
-    """A game already in night 1, with roles we choose instead of random ones."""
-    state = lobby(len(roles))
-    start_game(state, "p0", NOW, random.Random(0))
-    for i, role in enumerate(roles):
-        state.players[f"p{i}"].role = role
-    advance_phase(state, NOW)  # ROLE_REVEAL -> NIGHT
-    return state
-
-
-def act(state: GameState, player_id: str, target_id: str) -> None:
-    submit_night_action(state, player_id, target_id, state.phase_id)
-
-
-def vote(state: GameState, voter_id: str, target_id: str | None) -> None:
-    submit_vote(state, voter_id, target_id, state.phase_id)
-
-
-def to_voting(state: GameState) -> None:
-    """From DAWN: skip through discussion into voting."""
-    advance_phase(state, NOW)  # DAWN -> DISCUSSION
-    advance_phase(state, NOW)  # DISCUSSION -> VOTING
-
+from tests.helpers import EIGHT, FIVE, NOW, act, game_at_night, lobby, to_voting, vote
 
 # ----------------------------------------------------------------- lobby
 
@@ -122,9 +84,7 @@ def test_mafia_kill_and_detective_check():
     state = game_at_night(FIVE)
     act(state, "p0", "p3")  # mafia targets a villager
     act(state, "p1", "p4")  # doctor saves someone else
-    assert not should_end_early(state)
     act(state, "p2", "p0")  # detective checks the mafia
-    assert should_end_early(state)
 
     advance_phase(state, NOW)
 
@@ -159,8 +119,7 @@ def test_doctor_cannot_save_same_player_twice_in_a_row():
 
 
 def test_split_mafia_vote_kills_nobody():
-    eight = [Role.MAFIA, Role.MAFIA, Role.DOCTOR, Role.DETECTIVE] + [Role.VILLAGER] * 4
-    state = game_at_night(eight)
+    state = game_at_night(EIGHT)
     act(state, "p0", "p4")
     act(state, "p1", "p5")
     advance_phase(state, NOW)
@@ -171,7 +130,7 @@ def test_split_mafia_vote_kills_nobody():
 def test_illegal_night_actions():
     state = game_at_night(FIVE)
     cases = [
-        ("p3", "p0", "NO_NIGHT_ACTION"),  # villager
+        ("p3", "p3", "INVALID_TARGET"),  # villager suspects self
         ("p2", "p2", "INVALID_TARGET"),  # detective checks self
         ("p0", "p9", "INVALID_TARGET"),  # unknown target
     ]
@@ -179,6 +138,39 @@ def test_illegal_night_actions():
         with pytest.raises(GameError) as err:
             act(state, actor, target)
         assert err.value.code == code
+
+
+def test_night_ends_early_only_when_everyone_has_picked():
+    state = game_at_night(FIVE)
+    act(state, "p0", "p3")
+    act(state, "p1", "p4")
+    act(state, "p2", "p0")
+    act(state, "p3", "p0")
+    assert not should_end_early(state)  # p4 hasn't picked yet
+
+    act(state, "p4", "p1")
+    assert should_end_early(state)
+
+
+def test_dead_players_are_not_waited_for():
+    state = game_at_night(FIVE)
+    act(state, "p0", "p3")
+    advance_phase(state, NOW)  # p3 dies
+    to_voting(state)
+    advance_phase(state, NOW)  # nobody voted
+    advance_phase(state, NOW)  # NIGHT 2
+
+    for actor, target in [("p0", "p4"), ("p1", "p2"), ("p2", "p4"), ("p4", "p0")]:
+        act(state, actor, target)
+    assert should_end_early(state)  # p3 is dead, so all living players are done
+
+
+def test_villager_suspicions_are_cleared_each_night():
+    state = game_at_night(FIVE)
+    act(state, "p3", "p0")
+    assert state.night.suspects == {"p3": "p0"}
+    advance_phase(state, NOW)
+    assert state.night.suspects == {}
 
 
 def test_late_tap_from_old_phase_is_rejected():

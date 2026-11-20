@@ -152,12 +152,11 @@ def start_game(state: GameState, by: str, now_ms: int, rng: random.Random) -> No
 
 
 # ------------------------------------------------------------------ night
-
-
 def submit_night_action(state: GameState, player_id: str, target_id: str, phase_id: int) -> None:
-    """Mafia pick a victim, the doctor saves, the detective checks.
+    """Every living player picks someone at night, so nobody stands out by tapping.
 
-    A player can change their choice until the night ends.
+    Mafia pick a victim, the doctor saves, the detective checks, and villagers
+    name a suspect. A player can change their choice until the night ends.
     """
     _require_phase(state, Phase.NIGHT)
     _require_current_phase(state, phase_id)
@@ -178,19 +177,32 @@ def submit_night_action(state: GameState, player_id: str, target_id: str, phase_
         case Role.DETECTIVE:
             _require(target.id != actor.id, "INVALID_TARGET", "You already know your own role")
             state.night.detective_target = target.id
+        case Role.VILLAGER:
+            # Only a cover action: it hides who has a real job tonight.
+            _require(target.id != actor.id, "INVALID_TARGET", "Pick someone other than yourself")
+            state.night.suspects[actor.id] = target.id
         case _:
-            raise GameError("NO_NIGHT_ACTION", "Villagers sleep through the night")
+            raise GameError("NO_NIGHT_ACTION", "You have nothing to do tonight")
+
+
+def night_choice(state: GameState, player: Player) -> str | None:
+    """Who this player picked tonight, or None if they haven't picked yet."""
+    night = state.night
+    match player.role:
+        case Role.MAFIA:
+            return night.mafia_votes.get(player.id)
+        case Role.DOCTOR:
+            return night.doctor_target
+        case Role.DETECTIVE:
+            return night.detective_target
+        case Role.VILLAGER:
+            return night.suspects.get(player.id)
+        case _:
+            return None
 
 
 def night_actions_complete(state: GameState) -> bool:
-    for player in state.alive_players():
-        if player.role == Role.MAFIA and player.id not in state.night.mafia_votes:
-            return False
-        if player.role == Role.DOCTOR and state.night.doctor_target is None:
-            return False
-        if player.role == Role.DETECTIVE and state.night.detective_target is None:
-            return False
-    return True
+    return all(night_choice(state, p) is not None for p in state.alive_players())
 
 
 def _mafia_choice(mafia_votes: dict[str, str]) -> str | None:

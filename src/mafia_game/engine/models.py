@@ -72,6 +72,7 @@ class NightActions(BaseModel):
     mafia_votes: dict[str, str] = Field(default_factory=dict)  # mafia id -> target id
     doctor_target: str | None = None
     detective_target: str | None = None
+    suspects: dict[str, str] = Field(default_factory=dict)  # villager id -> suspect id
 
 
 class GameState(BaseModel):
