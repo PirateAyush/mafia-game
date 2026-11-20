@@ -120,6 +120,12 @@ def remove_player(state: GameState, player_id: str) -> None:
         state.host_id = next(iter(state.players))
 
 
+def transfer_host(state: GameState, new_host_id: str) -> None:
+    """Make another player the host. Works in any phase."""
+    _require(new_host_id in state.players, "UNKNOWN_PLAYER", "Player is not in this room")
+    state.host_id = new_host_id
+
+
 def update_settings(state: GameState, by: str, changes: dict[str, Any]) -> None:
     _require_host(state, by)
     _require_phase(state, Phase.LOBBY)
