@@ -9,6 +9,7 @@ Rule of thumb: a player sees what is public, plus what they already know
 from their own role. Nothing else.
 """
 
+from collections.abc import Collection
 from pydantic import BaseModel
 
 from mafia_game.engine.models import GameState, Phase, Player, Role, Settings, Team
@@ -20,6 +21,7 @@ class PlayerView(BaseModel):
     name: str
     alive: bool
     is_host: bool
+    online: bool  # has a phone connected right now
     role: Role | None  # None unless this viewer is allowed to know it
 
 
@@ -66,7 +68,8 @@ def can_see_role(state: GameState, viewer: Player, target: Player) -> bool:
     return False
 
 
-def view_for(state: GameState, viewer_id: str) -> GameView:
+def view_for(state: GameState, viewer_id: str, online: Collection[str] = ()) -> GameView:
+    """Build one player's view. `online` holds the ids of players with a phone connected."""
     viewer = state.players.get(viewer_id)
     if viewer is None:
         raise GameError("UNKNOWN_PLAYER", "Player is not in this room")
@@ -77,6 +80,7 @@ def view_for(state: GameState, viewer_id: str) -> GameView:
             name=p.name,
             alive=p.alive,
             is_host=p.id == state.host_id,
+            online=p.id in online,
             role=p.role if can_see_role(state, viewer, p) else None,
         )
         for p in state.players.values()

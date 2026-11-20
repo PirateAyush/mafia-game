@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mafia debug</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 760px; margin: 1rem auto; padding: 0 1rem; }
+    pre { background: #f4f4f4; padding: .75rem; overflow: auto; max-height: 55vh; font-size: 12px; }
+    button { margin: 2px; }
+    .row { margin: .6rem 0; }
+    #error { color: #b00020; min-height: 1.2em; }
+  </style>
+</head>
+<body>
+  <h1>Mafia debug page</h1>
+  <p>Each browser tab is one player. Refresh a tab to test reconnecting.</p>
+
+  <div id="join" class="row">
+    <input id="name" placeholder="Your name">
+    <button id="create">Create room</button>
+    <label><input type="checkbox" id="reveal"> reveal roles on death</label>
+    <br><br>
+    <input id="code" placeholder="Room code" size="8">
+    <button id="joinBtn">Join room</button>
+  </div>
+
+  <div id="game" hidden>
+    <div class="row"><b id="status"></b> <span id="timer"></span></div>
+    <div class="row" id="actions"></div>
+    <div class="row" id="targets"></div>
+  </div>
+  <div id="error"></div>
+  <pre id="view" hidden></pre>
+
+<script>
+// A throwaway page for testing the server by hand. The real frontend comes later.
+const $ = (id) => document.getElementById(id);
+let socket = null;
+let view = null;
+let clockOffset = 0; // server clock minus this phone's clock
+
+function showError(text) { $("error").textContent = text; }
+
+async function post(url, body) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.message || JSON.stringify(data.detail));
+  return data;
+}
+
+$("create").onclick = async () => {
+  try {
+    sit(await post("/rooms", { name: $("name").value, reveal_role_on_death: $("reveal").checked }));
+  } catch (e) { showError(e.message); }
+};
+
+$("joinBtn").onclick = async () => {
+  try {
+    sit(await post(`/rooms/${$("code").value.trim()}/join`, { name: $("name").value }));
+  } catch (e) { showError(e.message); }
+};
+
+function sit(seat) {
+  // sessionStorage is per tab and survives a refresh: ideal for one-player-per-tab testing.
+  sessionStorage.setItem("seat", JSON.stringify(seat));
+  connect(seat);
+}
+
+function connect(seat) {
+  const scheme = location.protocol === "https:" ? "wss" : "ws";
+  socket = new WebSocket(`${scheme}://${location.host}/ws/${seat.room_code}?token=${seat.token}`);
+
+  socket.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+    if (msg.type === "view") {
+      clockOffset = msg.server_time - Date.now();
+      view = msg.state;
+      showError("");
+      render();
+    } else if (msg.type === "error") {
+      showError(`${msg.code}: ${msg.message}`);
+    }
+  };
+
+  socket.onclose = (event) => {
+    if (event.code === 4404) {
+      sessionStorage.removeItem("seat");
+      showError("Room or seat not found. Create or join again.");
+      $("join").hidden = false;
+      $("game").hidden = true;
+      return;
+    }
+    if (event.code === 4409) { showError("This seat was opened in another tab."); return; }
+    showError("Connection lost, reconnecting...");
+    setTimeout(() => connect(seat), 1000);
+  };
+}
+
+function send(message) { socket.send(JSON.stringify(message)); }
+
+function addButton(parent, label, message) {
+  const button = document.createElement("button");
+  button.textContent = label; // textContent, never innerHTML: player names are untrusted input
+  button.onclick = () => send(message);
+  parent.appendChild(button);
+}
+
+function render() {
+  const you = view.you;
+  $("join").hidden = true;
+  $("game").hidden = false;
+  $("view").hidden = false;
+  $("status").textContent =
+    `Room ${view.room_code} | ${view.phase} | day ${view.day} | ` +
+    `${you.name}: ${you.role ?? "no role yet"}${you.alive ? "" : " (dead)"}`;
+
+  const actions = $("actions");
+  actions.replaceChildren();
+  if (you.is_host && view.phase === "LOBBY") addButton(actions, "Start game", { type: "start_game" });
+  if (you.is_host && view.phase === "DISCUSSION") addButton(actions, "Skip discussion", { type: "skip_discussion" });
+  if (you.is_host && view.phase === "GAME_OVER") addButton(actions, "Back to lobby", { type: "return_to_lobby" });
+  if (view.phase === "VOTING" && you.alive) {
+    addButton(actions, "Skip vote", { type: "vote", target: null, phase_id: view.phase_id });
+  }
+
+  const targets = $("targets");
+  targets.replaceChildren();
+  for (const p of view.players) {
+    if (!p.alive || !you.alive) continue;
+    const isSelf = p.id === you.id;
+    if (view.phase === "NIGHT" && (!isSelf || you.role === "DOCTOR")) {
+      addButton(targets, `Pick ${p.name}`, { type: "night_action", target: p.id, phase_id: view.phase_id });
+    }
+    if (view.phase === "VOTING" && !isSelf) {
+      addButton(targets, `Vote ${p.name}`, { type: "vote", target: p.id, phase_id: view.phase_id });
+    }
+  }
+
+  $("view").textContent = JSON.stringify(view, null, 2);
+}
+
+setInterval(() => {
+  if (!view || view.phase_ends_at === null) { $("timer").textContent = ""; return; }
+  const left = Math.max(0, Math.ceil((view.phase_ends_at - (Date.now() + clockOffset)) / 1000));
+  $("timer").textContent = `${left}s left`;
+}, 250);
+
+const saved = sessionStorage.getItem("seat");
+if (saved) connect(JSON.parse(saved));
+</script>
+</body>
+</html>
