@@ -309,3 +309,32 @@ async def test_rooms_with_players_online_are_kept(manager):
     await manager.sweep()
 
     assert room.state.room_code in manager.rooms
+
+
+# ------------------------------------------------- chat and rate limiting
+
+
+async def test_mafia_chat_reaches_only_mafia_phones(manager):
+    room, ids, conns = await started_at_night(manager)  # ids[0] is the only mafia
+    sent_before = [len(conn.sent) for conn in conns]
+
+    await manager.handle(room, ids[0], '{"type": "mafia_chat", "text": "Player3 tonight"}')
+
+    assert conns[0].last("mafia_chat")["message"]["text"] == "Player3 tonight"
+    for conn, before in zip(conns[1:], sent_before[1:], strict=True):
+        assert len(conn.sent) == before  # nothing at all, not even a view update
+    assert "Player3 tonight" in manager.store.saved[room.state.room_code]
+
+
+async def test_flooding_is_rate_limited(manager):
+    room, ids, conns = await room_with_players(manager)
+    for _ in range(10):  # the burst allowance
+        await manager.handle(room, ids[1], '{"type": "start_game"}')
+    assert conns[1].last("error")["code"] == "NOT_HOST"  # let through, then refused by the rules
+
+    await manager.handle(room, ids[1], '{"type": "start_game"}')
+    assert conns[1].last("error")["code"] == "RATE_LIMITED"  # the 11th is blocked
+
+    manager.clock.now += 1_000  # one second refills two messages
+    await manager.handle(room, ids[1], '{"type": "start_game"}')
+    assert conns[1].last("error")["code"] == "NOT_HOST"

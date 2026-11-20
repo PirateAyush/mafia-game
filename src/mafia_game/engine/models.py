@@ -17,6 +17,8 @@ MAX_PLAYERS = 12
 ROLE_REVEAL_SECONDS = 10
 DAWN_SECONDS = 6
 VERDICT_SECONDS = 6
+MAX_CHAT_LENGTH = 200  # characters per mafia chat message
+MAX_CHAT_HISTORY = 100  # older messages are dropped
 
 
 class Phase(StrEnum):
@@ -66,6 +68,13 @@ class Player(BaseModel):
         return self.role == Role.MAFIA
 
 
+class ChatMessage(BaseModel):
+    id: int  # 1, 2, 3... within one game
+    sender_id: str
+    text: str
+    sent_at: int  # epoch milliseconds
+
+
 class NightActions(BaseModel):
     """Choices made during the current night. Cleared every night."""
 
@@ -92,6 +101,7 @@ class GameState(BaseModel):
     votes: dict[str, str | None] = Field(default_factory=dict)  # voter -> target (None = skip)
     last_doctor_target: str | None = None
     detective_results: dict[str, bool] = Field(default_factory=dict)  # target -> is mafia
+    mafia_chat: list[ChatMessage] = Field(default_factory=list)  # newest last
 
     night_victim: str | None = None  # who died last night (shown at dawn)
     eliminated: str | None = None  # who was voted out (shown at the verdict)

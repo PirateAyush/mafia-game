@@ -21,13 +21,14 @@ from typing import Any, Protocol
 
 from pydantic import ValidationError
 
-from mafia_game.engine.models import GameState, Settings
+from mafia_game.engine.models import ChatMessage, GameState, Settings
 from mafia_game.engine.rules import (
     GameError,
     add_player,
     advance_phase,
     create_game,
     return_to_lobby,
+    send_mafia_chat,
     should_end_early,
     skip_discussion,
     start_game,
@@ -37,10 +38,12 @@ from mafia_game.engine.rules import (
     update_settings,
 )
 from mafia_game.engine.views import view_for
+from mafia_game.rooms.ratelimit import TokenBucket
 from mafia_game.rooms.store import MemoryRoomStore, RoomStore, SavedRoom
 from mafia_game.ws.protocol import (
     CastVote,
     ClientMessage,
+    MafiaChat,
     NightAction,
     ReturnToLobby,
     SkipDiscussion,
@@ -54,6 +57,10 @@ logger = logging.getLogger(__name__)
 ROOM_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  # no 0/O, 1/I/L look-alikes
 ROOM_CODE_LENGTH = 6
 SWEEP_EVERY_SECONDS = 60
+
+# Each player may send a burst of 10 messages, then 2 per second on average.
+RATE_LIMIT_BURST = 10
+RATE_LIMIT_PER_SECOND = 2
 
 # WebSocket close codes 4000-4999 are free for apps to define.
 CLOSE_NOT_FOUND = 4404  # bad room code or token: don't retry
@@ -82,6 +89,7 @@ class Room:
         self.lock = asyncio.Lock()
         self.connections: dict[str, Connection] = {}  # player id -> their open socket
         self.offline_since: dict[str, int] = {}  # player id -> when their phone dropped
+        self.rate_limits: dict[str, TokenBucket] = {}  # player id -> their message allowance
         self.last_seen = 0  # last time a real player did something (timers don't count)
         self.timer: asyncio.Task[None] | None = None
         self.timer_phase_id: int | None = None  # the phase the current timer belongs to
@@ -211,6 +219,10 @@ class RoomManager:
 
     async def handle(self, room: Room, player_id: str, raw: str) -> None:
         """Handle one raw message from a player's phone."""
+        # Checked first, before any parsing, so a flood costs us as little as possible.
+        if not self._allow(room, player_id):
+            await self._send_error(room, player_id, "RATE_LIMITED", "Too many messages, slow down")
+            return
         try:
             message = parse_client_message(raw)
         except ValidationError:
@@ -220,15 +232,32 @@ class RoomManager:
         async with room.lock:
             room.last_seen = self.clock()
             try:
-                self._apply(room.state, player_id, message)
+                chat = self._apply(room.state, player_id, message)
             except GameError as exc:
                 await self._send_error(room, player_id, exc.code, exc.message)
                 return
-            await self._after_change(room)
+            if chat is not None:
+                await self._send_mafia_chat(room, chat)
+                await self._save(room)
+            else:
+                await self._after_change(room)
 
-    def _apply(self, state: GameState, player_id: str, message: ClientMessage) -> None:
+    def _allow(self, room: Room, player_id: str) -> bool:
+        now = self.clock()
+        bucket = room.rate_limits.get(player_id)
+        if bucket is None:
+            bucket = TokenBucket(RATE_LIMIT_BURST, RATE_LIMIT_PER_SECOND, now)
+            room.rate_limits[player_id] = bucket
+        return bucket.allow(now)
+
+    def _apply(
+        self, state: GameState, player_id: str, message: ClientMessage
+    ) -> ChatMessage | None:
+        """Apply one message to the game. Returns the new chat message, if it was one."""
         now = self.clock()
         match message:
+            case MafiaChat(text=text):
+                return send_mafia_chat(state, player_id, text, now)
             case StartGame():
                 start_game(state, player_id, now, self.rng)
             case UpdateSettings(changes=changes):
@@ -241,6 +270,7 @@ class RoomManager:
                 skip_discussion(state, player_id, now)
             case ReturnToLobby():
                 return_to_lobby(state, player_id, now)
+        return None
 
     # ------------------------------------------------------ host hand-over
 
@@ -344,6 +374,18 @@ class RoomManager:
             }
             sends.append(_safe_send(conn, message))
         await asyncio.gather(*sends)  # send to all phones at the same time, not one by one
+
+    async def _send_mafia_chat(self, room: Room, chat: ChatMessage) -> None:
+        """Push one new chat message to mafia phones only. Nobody else receives
+        anything, not even a view update, so villagers can't tell when the
+        mafia are typing (or how much)."""
+        event = {"type": "mafia_chat", "message": chat.model_dump(mode="json")}
+        sends = [
+            _safe_send(conn, event)
+            for player_id, conn in room.connections.items()
+            if room.state.players[player_id].is_mafia
+        ]
+        await asyncio.gather(*sends)
 
     async def _send_error(self, room: Room, player_id: str, code: str, message: str) -> None:
         conn = room.connections.get(player_id)

@@ -29,6 +29,12 @@
     <div class="row"><b id="status"></b> <span id="timer"></span></div>
     <div class="row" id="actions"></div>
     <div class="row" id="targets"></div>
+    <div class="row" id="chat" hidden>
+      <b>Mafia chat</b>
+      <div id="chatLog"></div>
+      <input id="chatText" maxlength="200" placeholder="Message your team">
+      <button id="chatSend">Send</button>
+    </div>
   </div>
   <div id="error"></div>
   <pre id="view" hidden></pre>
@@ -39,6 +45,7 @@ const $ = (id) => document.getElementById(id);
 let socket = null;
 let view = null;
 let clockOffset = 0; // server clock minus this phone's clock
+let chat = []; // mafia chat messages, oldest first
 
 function showError(text) { $("error").textContent = text; }
 
@@ -80,8 +87,13 @@ function connect(seat) {
     if (msg.type === "view") {
       clockOffset = msg.server_time - Date.now();
       view = msg.state;
+      chat = view.mafia_chat ?? []; // a full view carries the whole chat history
       showError("");
       render();
+    } else if (msg.type === "mafia_chat") {
+      // A single new message. Skip it if a view already delivered it.
+      if (!chat.some((m) => m.id === msg.message.id)) chat.push(msg.message);
+      renderChat();
     } else if (msg.type === "error") {
       showError(`${msg.code}: ${msg.message}`);
     }
@@ -102,6 +114,14 @@ function connect(seat) {
 }
 
 function send(message) { socket.send(JSON.stringify(message)); }
+
+$("chatSend").onclick = () => {
+  const text = $("chatText").value.trim();
+  if (!text) return;
+  send({ type: "mafia_chat", text });
+  $("chatText").value = "";
+};
+$("chatText").onkeydown = (event) => { if (event.key === "Enter") $("chatSend").click(); };
 
 function addButton(parent, label, message) {
   const button = document.createElement("button");
@@ -141,7 +161,26 @@ function render() {
     }
   }
 
+  renderChat();
   $("view").textContent = JSON.stringify(view, null, 2);
+}
+
+function renderChat() {
+  const isMafia = view.you.role === "MAFIA";
+  $("chat").hidden = !isMafia;
+  if (!isMafia) return;
+
+  const names = Object.fromEntries(view.players.map((p) => [p.id, p.name]));
+  const log = $("chatLog");
+  log.replaceChildren();
+  for (const m of chat) {
+    const line = document.createElement("div");
+    line.textContent = `${names[m.sender_id] ?? "?"}: ${m.text}`; // textContent: chat is untrusted
+    log.appendChild(line);
+  }
+  const canSend = view.phase === "NIGHT" && view.you.alive;
+  $("chatText").disabled = !canSend;
+  $("chatSend").disabled = !canSend;
 }
 
 setInterval(() => {
