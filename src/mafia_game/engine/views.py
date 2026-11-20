@@ -13,7 +13,7 @@ from collections.abc import Collection
 
 from pydantic import BaseModel
 
-from mafia_game.engine.models import GameState, Phase, Player, Role, Settings, Team
+from mafia_game.engine.models import ChatMessage, GameState, Phase, Player, Role, Settings, Team
 from mafia_game.engine.rules import GameError, night_choice
 
 
@@ -53,6 +53,7 @@ class GameView(BaseModel):
 
     # Private: filled only for the role that may know it, None for everyone else
     mafia_votes: dict[str, str] | None  # mafia: what your teammates picked
+    mafia_chat: list[ChatMessage] | None  # mafia: the team's chat history
     detective_results: dict[str, bool] | None  # detective: player id -> is mafia
     last_doctor_target: str | None  # doctor: who you can't save tonight
 
@@ -110,6 +111,7 @@ def view_for(state: GameState, viewer_id: str, online: Collection[str] = ()) -> 
         eliminated=state.eliminated,
         winner=state.winner if state.phase == Phase.GAME_OVER else None,
         mafia_votes=dict(state.night.mafia_votes) if viewer.role == Role.MAFIA else None,
+        mafia_chat=list(state.mafia_chat) if viewer.role == Role.MAFIA else None,
         detective_results=(
             dict(state.detective_results) if viewer.role == Role.DETECTIVE else None
         ),

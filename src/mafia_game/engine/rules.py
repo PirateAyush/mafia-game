@@ -16,10 +16,13 @@ from pydantic import ValidationError
 
 from mafia_game.engine.models import (
     DAWN_SECONDS,
+    MAX_CHAT_HISTORY,
+    MAX_CHAT_LENGTH,
     MAX_PLAYERS,
     MIN_PLAYERS,
     ROLE_REVEAL_SECONDS,
     VERDICT_SECONDS,
+    ChatMessage,
     GameState,
     NightActions,
     Phase,
@@ -85,6 +88,7 @@ def _clear_round_data(state: GameState) -> None:
     state.votes = {}
     state.last_doctor_target = None
     state.detective_results = {}
+    state.mafia_chat = []
     state.night_victim = None
     state.eliminated = None
     state.winner = None
@@ -158,6 +162,8 @@ def start_game(state: GameState, by: str, now_ms: int, rng: random.Random) -> No
 
 
 # ------------------------------------------------------------------ night
+
+
 def submit_night_action(state: GameState, player_id: str, target_id: str, phase_id: int) -> None:
     """Every living player picks someone at night, so nobody stands out by tapping.
 
@@ -209,6 +215,25 @@ def night_choice(state: GameState, player: Player) -> str | None:
 
 def night_actions_complete(state: GameState) -> bool:
     return all(night_choice(state, p) is not None for p in state.alive_players())
+
+
+def send_mafia_chat(state: GameState, player_id: str, text: str, now_ms: int) -> ChatMessage:
+    """A living mafia member messages their team. Night only, like the real game."""
+    _require_phase(state, Phase.NIGHT)
+    sender = _alive_player(state, player_id)
+    _require(sender.is_mafia, "NOT_MAFIA", "Only the mafia have a night chat")
+    text = text.strip()
+    _require(
+        1 <= len(text) <= MAX_CHAT_LENGTH,
+        "INVALID_MESSAGE",
+        f"Messages must be 1 to {MAX_CHAT_LENGTH} characters",
+    )
+
+    next_id = state.mafia_chat[-1].id + 1 if state.mafia_chat else 1
+    message = ChatMessage(id=next_id, sender_id=sender.id, text=text, sent_at=now_ms)
+    state.mafia_chat.append(message)
+    del state.mafia_chat[:-MAX_CHAT_HISTORY]  # keep only the newest messages
+    return message
 
 
 def _mafia_choice(mafia_votes: dict[str, str]) -> str | None:

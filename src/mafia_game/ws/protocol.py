@@ -43,9 +43,21 @@ class ReturnToLobby(_Message):
     type: Literal["return_to_lobby"]
 
 
+class MafiaChat(_Message):
+    type: Literal["mafia_chat"]
+    # A loose cap that rejects huge payloads early. The game's own limit is stricter.
+    text: str = Field(max_length=1000)
+
+
 # The "type" field tells Pydantic which model to use, so it checks only that one.
 ClientMessage = Annotated[
-    StartGame | UpdateSettings | NightAction | CastVote | SkipDiscussion | ReturnToLobby,
+    StartGame
+    | UpdateSettings
+    | NightAction
+    | CastVote
+    | SkipDiscussion
+    | ReturnToLobby
+    | MafiaChat,
     Field(discriminator="type"),
 ]
 _client_message = TypeAdapter(ClientMessage)
