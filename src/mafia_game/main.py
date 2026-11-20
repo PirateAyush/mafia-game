@@ -6,6 +6,7 @@ RoomManager, which does the real work.
 Run locally with:  uv run uvicorn mafia_game.main:app --reload
 """
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -13,12 +14,18 @@ from pathlib import Path
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
+from redis.asyncio import Redis
 
+from mafia_game.config import AppConfig
 from mafia_game.engine.models import Settings
 from mafia_game.engine.rules import GameError
 from mafia_game.rooms.manager import CLOSE_NOT_FOUND, RoomManager
+from mafia_game.rooms.store import RedisRoomStore
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s - %(message)s")
+logger = logging.getLogger(__name__)
 
 
 class CreateRoomRequest(BaseModel):
@@ -38,11 +45,24 @@ class SeatResponse(BaseModel):
     token: str
 
 
+def build_manager(config: AppConfig) -> RoomManager:
+    """The real setup: rooms saved in Redis, settings from the environment."""
+    client = Redis.from_url(config.redis_url, decode_responses=True)
+    return RoomManager(
+        store=RedisRoomStore(client, config.room_ttl_seconds),
+        host_grace_seconds=config.host_grace_seconds,
+        idle_room_seconds=config.idle_room_seconds,
+    )
+
+
 def create_app(manager: RoomManager | None = None) -> FastAPI:
-    rooms = manager or RoomManager()
+    rooms = manager or build_manager(AppConfig())
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        restored = await rooms.restore()
+        logger.info("Restored %d room(s) from the store", restored)
+        rooms.start()
         yield  # the server runs here
         await rooms.close()
 

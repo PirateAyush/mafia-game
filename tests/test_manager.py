@@ -7,6 +7,7 @@ import pytest
 from mafia_game.engine.models import Phase, Role, Settings
 from mafia_game.engine.rules import GameError
 from mafia_game.rooms.manager import CLOSE_REPLACED, RoomManager
+from mafia_game.rooms.store import MemoryRoomStore
 
 pytestmark = pytest.mark.anyio  # run every test in this file inside an event loop
 
@@ -189,3 +190,122 @@ async def test_disconnect_shows_player_offline(manager):
     players = {p["id"]: p for p in conns[0].view()["players"]}
     assert players[ids[2]]["online"] is False
     assert players[ids[1]]["online"] is True
+
+
+# ---------------------------------------------------- saving and restoring
+
+
+async def test_restart_brings_rooms_and_seats_back():
+    store, clock = MemoryRoomStore(), FakeClock()
+    before = RoomManager(clock=clock, rng=random.Random(0), store=store)
+    room, ids, conns = await room_with_players(before)
+    await before.handle(room, ids[0], '{"type": "start_game"}')
+    token = next(t for t, p in room.tokens.items() if p == ids[3])
+
+    after = RoomManager(clock=clock, rng=random.Random(0), store=store)  # the "new server"
+    assert await after.restore() == 1
+
+    restored, player_id = after.find_player(room.state.room_code, token)
+    assert player_id == ids[3]  # same seat, same token
+    assert restored.state == room.state
+    assert restored.version == room.version  # views never go backwards for phones
+    assert restored.timer is not None  # the role reveal countdown is running again
+    await before.close()
+    await after.close()
+
+
+async def test_overdue_phase_moves_on_right_after_restart():
+    store, clock = MemoryRoomStore(), FakeClock()
+    before = RoomManager(clock=clock, rng=random.Random(0), store=store)
+    room, ids, conns = await room_with_players(before)
+    await before.handle(room, ids[0], '{"type": "start_game"}')
+
+    clock.now += 11_000  # the server was down past the end of role reveal
+    after = RoomManager(clock=clock, rng=random.Random(0), store=store)
+    await after.restore()
+    restored = after.get_room(room.state.room_code)
+    await restored.timer  # fires at once, because its end time has already passed
+
+    assert restored.state.phase == Phase.NIGHT
+    await before.close()
+    await after.close()
+
+
+async def test_broken_store_does_not_stop_the_game():
+    class BrokenStore(MemoryRoomStore):
+        async def save(self, room):
+            raise ConnectionError("Redis is down")
+
+    rooms = RoomManager(clock=FakeClock(), rng=random.Random(0), store=BrokenStore())
+    room, ids, conns = await room_with_players(rooms)
+    await rooms.handle(room, ids[0], '{"type": "start_game"}')
+
+    assert conns[0].view()["phase"] == "ROLE_REVEAL"
+    await rooms.close()
+
+
+# --------------------------------------------------------- host hand-over
+
+
+async def test_host_is_handed_over_after_the_grace_period(manager):
+    room, ids, conns = await room_with_players(manager)
+    await manager.disconnect(room, ids[0], conns[0])
+
+    manager.clock.now += 30_000
+    await manager._check_host(room)
+    assert room.state.host_id == ids[0]  # still within the 60 seconds
+
+    manager.clock.now += 31_000
+    await manager._check_host(room)
+    assert room.state.host_id == ids[1]  # the next player in join order
+    assert conns[1].view()["you"]["is_host"] is True
+
+
+async def test_host_who_comes_back_in_time_stays_host(manager):
+    room, ids, conns = await room_with_players(manager)
+    await manager.disconnect(room, ids[0], conns[0])
+    manager.clock.now += 30_000
+    await manager.connect(room, ids[0], FakeConnection())
+
+    manager.clock.now += 60_000
+    await manager._check_host(room)
+    assert room.state.host_id == ids[0]
+
+
+async def test_after_restart_first_player_back_takes_over_from_a_missing_host():
+    store, clock = MemoryRoomStore(), FakeClock()
+    before = RoomManager(clock=clock, rng=random.Random(0), store=store)
+    room, ids, conns = await room_with_players(before)
+
+    after = RoomManager(clock=clock, rng=random.Random(0), store=store)
+    await after.restore()
+    restored = after.get_room(room.state.room_code)
+    clock.now += 61_000
+    await after.connect(restored, ids[2], FakeConnection())
+
+    assert restored.state.host_id == ids[2]
+    await before.close()
+    await after.close()
+
+
+# ---------------------------------------------------------------- sweeper
+
+
+async def test_idle_empty_rooms_are_forgotten(manager):
+    code, host_id, token = await manager.create_room("Asha", Settings())
+
+    manager.clock.now += 31 * 60 * 1000
+    await manager.sweep()
+
+    assert code not in manager.rooms
+    assert manager.find_player(code, token) is None
+    assert manager.store.saved == {}
+
+
+async def test_rooms_with_players_online_are_kept(manager):
+    room, ids, conns = await room_with_players(manager)
+
+    manager.clock.now += 31 * 60 * 1000
+    await manager.sweep()
+
+    assert room.state.room_code in manager.rooms

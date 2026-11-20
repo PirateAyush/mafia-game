@@ -13,6 +13,7 @@ from mafia_game.engine.rules import (
     skip_discussion,
     start_game,
     submit_night_action,
+    transfer_host,
     update_settings,
 )
 from tests.helpers import EIGHT, FIVE, NOW, act, game_at_night, lobby, to_voting, vote
@@ -283,3 +284,13 @@ def test_state_survives_a_json_round_trip():
     act(state, "p0", "p3")
     restored = GameState.model_validate_json(state.model_dump_json())
     assert restored == state
+
+
+def test_host_can_be_transferred_mid_game():
+    state = game_at_night(FIVE)
+    transfer_host(state, "p2")
+    assert state.host_id == "p2"
+
+    with pytest.raises(GameError) as err:
+        transfer_host(state, "p99")
+    assert err.value.code == "UNKNOWN_PLAYER"
