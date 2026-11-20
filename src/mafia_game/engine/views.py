@@ -10,6 +10,7 @@ from their own role. Nothing else.
 """
 
 from collections.abc import Collection
+
 from pydantic import BaseModel
 
 from mafia_game.engine.models import GameState, Phase, Player, Role, Settings, Team
