@@ -198,20 +198,30 @@ async def test_disconnect_shows_player_offline(manager):
 async def test_restart_brings_rooms_and_seats_back():
     store, clock = MemoryRoomStore(), FakeClock()
     before = RoomManager(clock=clock, rng=random.Random(0), store=store)
-    room, ids, conns = await room_with_players(before)
-    await before.handle(room, ids[0], '{"type": "start_game"}')
-    token = next(t for t, p in room.tokens.items() if p == ids[3])
+    code, host_id, token = await before.create_room("Player0", Settings())
+    for i in range(1, 5):
+        await before.join_room(code, f"Player{i}")
+    room = before.get_room(code)
+    await before.handle(room, host_id, '{"type": "start_game"}')
 
     after = RoomManager(clock=clock, rng=random.Random(0), store=store)  # the "new server"
     assert await after.restore() == 1
 
-    restored, player_id = after.find_player(room.state.room_code, token)
-    assert player_id == ids[3]  # same seat, same token
+    restored, player_id = after.find_player(code, token)
+    assert player_id == host_id  # same seat, same token
     assert restored.state == room.state
     assert restored.version == room.version  # views never go backwards for phones
     assert restored.timer is not None  # the role reveal countdown is running again
     await before.close()
     await after.close()
+
+
+async def test_tokens_are_stored_only_as_hashes(manager):
+    code, host_id, token = await manager.create_room("Asha", Settings())
+
+    saved = manager.store.saved[code]
+    assert token not in saved  # the token itself is never written to the store
+    assert manager.find_player(code, token)[1] == host_id  # ...but it still works
 
 
 async def test_overdue_phase_moves_on_right_after_restart():

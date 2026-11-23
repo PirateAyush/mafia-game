@@ -12,6 +12,7 @@ Every change to a room follows the same pattern, always inside the room's lock:
 """
 
 import asyncio
+import hashlib
 import logging
 import random
 import secrets
@@ -184,7 +185,7 @@ class RoomManager:
         return room
 
     def find_player(self, code: str, token: str) -> tuple[Room, str] | None:
-        seat = self.tokens.get(token)
+        seat = self.tokens.get(hash_token(token))
         if seat is None or seat[0] != code.upper():
             return None
         return self.rooms[seat[0]], seat[1]
@@ -418,10 +419,20 @@ class RoomManager:
                 return code
 
     def _issue_token(self, room: Room, player_id: str) -> str:
+        """Create a seat token. Only its hash is kept; the token itself goes to the phone."""
         token = secrets.token_urlsafe(24)
-        room.tokens[token] = player_id
-        self.tokens[token] = (room.state.room_code, player_id)
+        token_hash = hash_token(token)
+        room.tokens[token_hash] = player_id
+        self.tokens[token_hash] = (room.state.room_code, player_id)
         return token
+
+
+def hash_token(token: str) -> str:
+    """SHA-256 of a seat token. Anyone who reads Redis sees only hashes, which
+    can't be turned back into tokens. A fast hash is fine here because tokens
+    are 192 random bits, so they can't be guessed; passwords would need a slow
+    hash like bcrypt, because people choose guessable ones."""
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 def _new_player_id() -> str:

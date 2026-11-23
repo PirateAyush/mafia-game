@@ -6,6 +6,7 @@ RoomManager, which does the real work.
 Run locally with:  uv run uvicorn mafia_game.main:app --reload
 """
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -13,7 +14,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from redis.asyncio import Redis
 
 from mafia_game.config import AppConfig
@@ -21,8 +22,12 @@ from mafia_game.engine.models import Settings
 from mafia_game.engine.rules import GameError
 from mafia_game.rooms.manager import CLOSE_NOT_FOUND, RoomManager
 from mafia_game.rooms.store import RedisRoomStore
+from mafia_game.ws.protocol import Auth
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+AUTH_TIMEOUT_SECONDS = 5  # a phone must say who it is this quickly after connecting
+CLOSE_AUTH_TIMEOUT = 4408  # it didn't: the phone may simply retry
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -84,13 +89,29 @@ def create_app(manager: RoomManager | None = None) -> FastAPI:
         player_id, token = await rooms.join_room(code, body.name)
         return SeatResponse(room_code=code.upper(), player_id=player_id, token=token)
 
+    @app.get("/healthz")
+    async def health() -> dict[str, object]:
+        """Liveness check for Docker and uptime monitors: is the process up and responding?"""
+        return {"status": "ok", "rooms": len(rooms.rooms)}
+
     @app.websocket("/ws/{code}")
-    async def game_socket(websocket: WebSocket, code: str, token: str) -> None:
+    async def game_socket(websocket: WebSocket, code: str) -> None:
+        # Accept first, then close with our own codes, so the phone knows why.
+        # Rejecting before accept looks like a network error and it would retry forever.
         await websocket.accept()
-        found = rooms.find_player(code, token)
+        try:
+            raw = await asyncio.wait_for(websocket.receive_text(), AUTH_TIMEOUT_SECONDS)
+        except WebSocketDisconnect:
+            return  # left before saying who they are
+        except TimeoutError:
+            await websocket.close(code=CLOSE_AUTH_TIMEOUT)
+            return
+
+        try:
+            found = rooms.find_player(code, Auth.model_validate_json(raw).token)
+        except ValidationError:
+            found = None
         if found is None:
-            # Accept first, then close with our own code, so the phone knows
-            # not to keep retrying. Rejecting before accept looks like a network error.
             await websocket.close(code=CLOSE_NOT_FOUND)
             return
 
