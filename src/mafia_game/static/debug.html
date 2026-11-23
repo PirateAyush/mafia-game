@@ -80,7 +80,9 @@ function sit(seat) {
 
 function connect(seat) {
   const scheme = location.protocol === "https:" ? "wss" : "ws";
-  socket = new WebSocket(`${scheme}://${location.host}/ws/${seat.room_code}?token=${seat.token}`);
+  socket = new WebSocket(`${scheme}://${location.host}/ws/${seat.room_code}`);
+  // The token goes in the first message, never in the URL, so it stays out of logs.
+  socket.onopen = () => send({ type: "auth", token: seat.token });
 
   socket.onmessage = (event) => {
     const msg = JSON.parse(event.data);

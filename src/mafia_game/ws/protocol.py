@@ -49,6 +49,16 @@ class MafiaChat(_Message):
     text: str = Field(max_length=1000)
 
 
+class Auth(_Message):
+    """The first message on every connection: proves which seat this phone owns.
+
+    Sent inside the socket, not in the URL, so the token never appears in
+    server logs, proxy logs or browser history."""
+
+    type: Literal["auth"]
+    token: str = Field(max_length=100)
+
+
 # The "type" field tells Pydantic which model to use, so it checks only that one.
 ClientMessage = Annotated[
     StartGame
