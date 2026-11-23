@@ -1,2 +1,1 @@
-def main() -> None:
-    print("Hello from mafia-game!")
+"""Mafia: a real-time party game server."""
