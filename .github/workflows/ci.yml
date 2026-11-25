@@ -51,7 +51,7 @@ jobs:
 
       - name: Run tests
         run: uv run pytest
-        
+
   docker:
     name: Docker image builds
     runs-on: ubuntu-latest
@@ -62,3 +62,37 @@ jobs:
 
       - name: Build the image
         run: docker build --tag mafia-game:ci .
+
+  deploy:
+    name: Deploy to server
+    # Only after both checks pass, and only for pushes to master (merged PRs), never for PRs.
+    needs: [check, docker]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # If two merges land close together, deploy them one after the other, never at once.
+    concurrency:
+      group: production
+      cancel-in-progress: false
+    environment:
+      name: production
+      url: https://ayush-mafia.duckdns.org
+    steps:
+      - name: Deploy over SSH
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          # The server ignores any command we send: this key can only run the deploy.
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes "ubuntu@$HOST"
+
+      - name: Check the live site
+        run: >-
+          curl --fail --silent --show-error
+          --retry 10 --retry-delay 3 --retry-all-errors
+          https://ayush-mafia.duckdns.org/healthz
